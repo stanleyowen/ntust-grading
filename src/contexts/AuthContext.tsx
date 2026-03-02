@@ -83,7 +83,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
     }
 
-    const studentId = normalizedEmail.replace("@mail.ntust.edu.tw", "");
+    const studentId = normalizedEmail
+      .replace("@mail.ntust.edu.tw", "")
+      .toUpperCase();
     const approvedRef = doc(db, "students", studentId);
     const approvedSnap = await getDoc(approvedRef);
 
