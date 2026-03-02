@@ -1,3 +1,9 @@
+export interface Class {
+  id: string;
+  name: string;
+  description?: string;
+}
+
 export interface GradingSettings {
   midtermOpen: boolean;
   finalOpen: boolean;
@@ -7,6 +13,7 @@ export interface Student {
   id: string; // Firestore doc ID = studentId
   studentId: string;
   name: string;
+  classId?: string; // which class this student belongs to
   uid?: string; // Firebase Auth UID (set after registration)
   registeredAt?: Date;
 }
@@ -27,5 +34,6 @@ export interface GradeSubmission {
   };
   total: number;
   comment: string;
+  classId?: string;
   submittedAt: Date;
 }

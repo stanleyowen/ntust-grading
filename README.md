@@ -37,47 +37,87 @@ Admin emails are hardcoded in the app (`tswu@mail.ntust.edu.tw` and `me@stanleyo
 3. The app recognises the email and creates the account — no student list check needed
 4. Admins log in at `/login` with their full email address
 
-### 4. Add Students (Admin Panel)
+### 4. Create Classes First (Admin Panel)
 
-Once logged in as admin → go to `/admin` → **學生名單** tab:
+Before adding any students, create your classes:
 
+1. Log in as admin → go to `/admin` → **班級管理** tab
+2. Enter a class name (e.g. `資工3甲 週一 8:00`) and optional description, then click **新增**
+3. Repeat for each class you teach
+
+### 5. Add Students (Admin Panel)
+
+Once at least one class exists → **學生名單** tab:
+
+- Select the target class from the **班級篩選** dropdown at the top before adding students
 - Add one by one, or bulk import (format: `學號 姓名` one per line)
 - Example: `B1234567 張小明`
+- Students added while a class is selected are automatically assigned to that class
 
-Students then go to `/register`, enter their NTUST email (`學號@mail.ntust.edu.tw`) and set a password — the system looks up their name from the student list automatically.
+Students then go to `/register`, enter their NTUST email (`學號@mail.ntust.edu.tw`) and set a password — the system looks up their name and class from the student list automatically.
 
 ### 5. Firestore Security Rules
+
+The rules below cover the multi-class structure added in the latest update.
+Copy and paste them wholesale into **Firestore → Rules** in the Firebase Console.
 
 ```
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+
+    // ── Helpers ──────────────────────────────────────────────────────
     function isAdmin() {
       return request.auth != null
           && (request.auth.token.email == "tswu@mail.ntust.edu.tw"
            || request.auth.token.email == "me@stanleyowen.com");
     }
-    function isStageOpen(stage) {
-      let s = get(/databases/$(database)/documents/settings/grading).data;
+
+    // Looks up the correct settings doc:
+    //   - students assigned to a class → settings/{classId}
+    //   - legacy accounts with no class → settings/grading
+    function isStageOpen(stage, classId) {
+      let settingsId = (classId != null && classId != '') ? classId : 'grading';
+      let s = get(/databases/$(database)/documents/settings/$(settingsId)).data;
       return (stage == 'midterm' && s.midtermOpen == true)
           || (stage == 'final'   && s.finalOpen   == true);
     }
-    match /settings/grading {
+
+    // ── Classes ──────────────────────────────────────────────────────
+    match /classes/{classId} {
+      allow read: if request.auth != null;   // students need to read class names
+      allow write: if isAdmin();
+    }
+
+    // ── Per-class (and legacy global) grading settings ────────────────
+    // Document IDs are either a classId or the legacy "grading" sentinel.
+    match /settings/{settingsId} {
       allow read: if request.auth != null;
       allow write: if isAdmin();
     }
+
+    // ── Approved student roster ───────────────────────────────────────
     match /students/{studentId} {
       allow read: if request.auth != null;
       allow write: if isAdmin();
     }
+
+    // ── Student auth profiles (created on registration) ───────────────
     match /students_auth/{uid} {
       allow read, create, update: if request.auth != null && request.auth.uid == uid;
     }
+
+    // ── Grade submissions ─────────────────────────────────────────────
     match /grades/{gradeId} {
       allow create: if request.auth != null
-                    && isStageOpen(request.resource.data.stage);
+                    && isStageOpen(
+                         request.resource.data.stage,
+                         request.resource.data.classId   // may be null for legacy
+                       );
       allow read: if isAdmin();
     }
+
+    // ── Teacher score adjustments ─────────────────────────────────────
     match /adjustments/{docId} {
       allow read, write: if isAdmin();
     }

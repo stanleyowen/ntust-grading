@@ -13,6 +13,7 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
+  sendPasswordResetEmail,
 } from "firebase/auth";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { auth, db } from "@/lib/firebase";
@@ -29,6 +30,7 @@ interface AuthContextType {
   login: (studentId: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  resetPassword: (input: string) => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -116,11 +118,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await setDoc(doc(db, "students_auth", uid), {
       studentId,
       name: approvedStudent.name,
+      classId: approvedStudent.classId ?? null,
       uid,
       registeredAt: serverTimestamp(),
     });
 
-    setStudent({ id: studentId, studentId, name: approvedStudent.name, uid });
+    setStudent({
+      id: studentId,
+      studentId,
+      name: approvedStudent.name,
+      classId: approvedStudent.classId,
+      uid,
+    });
   }
 
   async function logout() {
@@ -128,9 +137,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setStudent(null);
   }
 
+  async function resetPassword(input: string) {
+    const email = input.includes("@")
+      ? input.trim()
+      : toStudentEmail(input.trim());
+    await sendPasswordResetEmail(auth, email);
+  }
+
   return (
     <AuthContext.Provider
-      value={{ user, student, loading, isAdmin, login, register, logout }}
+      value={{
+        user,
+        student,
+        loading,
+        isAdmin,
+        login,
+        register,
+        logout,
+        resetPassword,
+      }}
     >
       {children}
     </AuthContext.Provider>
