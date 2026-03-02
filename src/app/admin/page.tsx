@@ -69,10 +69,29 @@ export default function AdminPage() {
   const [adjustmentInput, setAdjustmentInput] = useState("");
 
   async function loadStudents() {
-    const snap = await getDocs(collection(db, "students"));
+    const studentsSnap = await getDocs(collection(db, "students"));
+
+    // Build a map of studentId -> uid from students_auth so that students who
+    // registered before the uid-backfill fix still show as "已註冊".
+    const uidByStudentId: Record<string, string> = {};
+    try {
+      const authSnap = await getDocs(collection(db, "students_auth"));
+      authSnap.docs.forEach((d) => {
+        const data = d.data();
+        if (data.studentId && data.uid) {
+          uidByStudentId[data.studentId as string] = data.uid as string;
+        }
+      });
+    } catch {
+      // Firestore rules may restrict admin reads of students_auth; best-effort only.
+    }
+
     setStudents(
-      snap.docs
-        .map((d) => d.data() as Student)
+      studentsSnap.docs
+        .map((d) => {
+          const s = d.data() as Student;
+          return s.uid ? s : { ...s, uid: uidByStudentId[s.studentId] };
+        })
         .sort((a, b) => a.studentId.localeCompare(b.studentId)),
     );
   }

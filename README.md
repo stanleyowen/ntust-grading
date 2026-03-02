@@ -71,7 +71,8 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
     match /students_auth/{uid} {
-      allow read, create, update: if request.auth != null && request.auth.uid == uid;
+      allow read: if request.auth != null && (request.auth.uid == uid || isAdmin());
+      allow create, update: if request.auth != null && request.auth.uid == uid;
     }
     match /grades/{gradeId} {
       allow create: if request.auth != null
