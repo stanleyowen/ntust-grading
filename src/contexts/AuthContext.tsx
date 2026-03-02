@@ -88,41 +88,59 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const studentId = normalizedEmail
       .replace("@mail.ntust.edu.tw", "")
       .toUpperCase();
-    const approvedRef = doc(db, "students", studentId);
-    const approvedSnap = await getDoc(approvedRef);
 
-    if (!approvedSnap.exists()) {
-      throw new Error("此學號不在核准名單中，請聯絡老師。");
+    // Create the Firebase account first so the user is authenticated
+    // before any Firestore reads/writes (rules require request.auth != null).
+    // Firebase Auth itself enforces email uniqueness (auth/email-already-in-use),
+    // so no need to stamp uid back onto the students document.
+    let credential;
+    try {
+      credential = await createUserWithEmailAndPassword(
+        auth,
+        normalizedEmail,
+        password,
+      );
+    } catch (err: unknown) {
+      if (
+        err instanceof Error &&
+        (err as { code?: string }).code === "auth/email-already-in-use"
+      ) {
+        throw new Error("此帳號已被註冊，如有問題請聯絡老師。");
+      }
+      throw err;
     }
-
-    const approvedStudent = approvedSnap.data() as Student;
-
-    if (approvedStudent.uid) {
-      throw new Error("此帳號已被註冊，如有問題請聯絡老師。");
-    }
-
-    // Create Firebase account with the real NTUST email
-    const credential = await createUserWithEmailAndPassword(
-      auth,
-      normalizedEmail,
-      password,
-    );
     const uid = credential.user.uid;
 
-    await setDoc(
-      approvedRef,
-      { ...approvedStudent, uid, registeredAt: serverTimestamp() },
-      { merge: true },
-    );
+    try {
+      const approvedRef = doc(db, "students", studentId);
+      const approvedSnap = await getDoc(approvedRef);
 
-    await setDoc(doc(db, "students_auth", uid), {
-      studentId,
-      name: approvedStudent.name,
-      uid,
-      registeredAt: serverTimestamp(),
-    });
+      if (!approvedSnap.exists()) {
+        await credential.user.delete();
+        throw new Error("此學號不在核准名單中，請聯絡老師。");
+      }
 
-    setStudent({ id: studentId, studentId, name: approvedStudent.name, uid });
+      const approvedStudent = approvedSnap.data() as Student;
+
+      // Write only to students_auth/{uid} — allowed by existing rules:
+      // "allow read, create, update: if request.auth != null && request.auth.uid == uid"
+      await setDoc(doc(db, "students_auth", uid), {
+        studentId,
+        name: approvedStudent.name,
+        uid,
+        registeredAt: serverTimestamp(),
+      });
+
+      setStudent({ id: studentId, studentId, name: approvedStudent.name, uid });
+    } catch (err) {
+      // Roll back the Firebase Auth account if Firestore setup fails
+      try {
+        await credential.user.delete();
+      } catch {
+        /* ignore */
+      }
+      throw err;
+    }
   }
 
   async function logout() {
