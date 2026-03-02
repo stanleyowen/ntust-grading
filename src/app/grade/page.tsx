@@ -87,10 +87,9 @@ export default function GradePage() {
     settings === null ||
     (stage === "midterm" ? !settings.midtermOpen : !settings.finalOpen);
 
-  // Load grading settings (real-time, scoped to class if student has one)
+  // Load grading settings (real-time)
   useEffect(() => {
-    const settingsId = student?.classId ?? "grading";
-    const unsub = onSnapshot(doc(db, "settings", settingsId), (snap) => {
+    const unsub = onSnapshot(doc(db, "settings", "grading"), (snap) => {
       if (snap.exists()) {
         setSettings(snap.data() as GradingSettings);
       } else {
@@ -98,21 +97,12 @@ export default function GradePage() {
       }
     });
     return unsub;
-  }, [student?.classId]);
+  }, []);
 
-  // Load student list (exclude self, scoped to same class if student has a classId)
+  // Load student list (exclude self)
   useEffect(() => {
     async function load() {
-      let snap;
-      if (student?.classId) {
-        const q = query(
-          collection(db, "students"),
-          where("classId", "==", student.classId),
-        );
-        snap = await getDocs(q);
-      } else {
-        snap = await getDocs(collection(db, "students"));
-      }
+      const snap = await getDocs(collection(db, "students"));
       const list: Student[] = snap.docs
         .map((d) => d.data() as Student)
         .filter((s) => s.studentId !== student?.studentId);
@@ -194,7 +184,6 @@ export default function GradePage() {
       scores: numScores,
       total,
       comment: comment.trim(),
-      classId: student.classId,
       submittedAt: new Date(),
     };
 

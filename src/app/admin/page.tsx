@@ -11,12 +11,10 @@ import {
   query,
   orderBy,
   getDoc,
-  addDoc,
-  where,
   onSnapshot,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { Class, Student, GradeSubmission, GradingSettings } from "@/lib/types";
+import { Student, GradeSubmission, GradingSettings } from "@/lib/types";
 import {
   Users,
   Star,
@@ -32,10 +30,9 @@ import {
   Edit3,
   Check,
   X,
-  Layers,
 } from "lucide-react";
 
-type Tab = "classes" | "students" | "grades" | "settings";
+type Tab = "students" | "grades" | "settings";
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("students");
@@ -71,66 +68,8 @@ export default function AdminPage() {
   );
   const [adjustmentInput, setAdjustmentInput] = useState("");
 
-  // Class management
-  const [classes, setClasses] = useState<Class[]>([]);
-  const [selectedClassId, setSelectedClassId] = useState("");
-  const [newClassName, setNewClassName] = useState("");
-  const [newClassDesc, setNewClassDesc] = useState("");
-  const [classError, setClassError] = useState("");
-  const [addingClass, setAddingClass] = useState(false);
-
-  async function loadClasses() {
-    const snap = await getDocs(collection(db, "classes"));
-    setClasses(
-      snap.docs
-        .map((d) => ({ id: d.id, ...d.data() }) as Class)
-        .sort((a, b) => a.name.localeCompare(b.name)),
-    );
-  }
-
-  async function addClass() {
-    setClassError("");
-    if (!newClassName.trim()) {
-      setClassError("請填寫班級名稱。");
-      return;
-    }
-    setAddingClass(true);
-    try {
-      const ref = await addDoc(collection(db, "classes"), {
-        name: newClassName.trim(),
-        description: newClassDesc.trim() || null,
-      });
-      await setDoc(ref, {
-        id: ref.id,
-        name: newClassName.trim(),
-        description: newClassDesc.trim() || null,
-      });
-      setNewClassName("");
-      setNewClassDesc("");
-      await loadClasses();
-    } catch {
-      setClassError("新增失敗，請再試一次。");
-    } finally {
-      setAddingClass(false);
-    }
-  }
-
-  async function deleteClass(classId: string, className: string) {
-    if (!confirm(`確定要刪除班級「${className}」？學生資料不會被刪除。`)) return;
-    await deleteDoc(doc(db, "classes", classId));
-    if (selectedClassId === classId) setSelectedClassId("");
-    await loadClasses();
-  }
-
   async function loadStudents() {
-    const snap = selectedClassId
-      ? await getDocs(
-          query(
-            collection(db, "students"),
-            where("classId", "==", selectedClassId),
-          ),
-        )
-      : await getDocs(collection(db, "students"));
+    const snap = await getDocs(collection(db, "students"));
     setStudents(
       snap.docs
         .map((d) => d.data() as Student)
@@ -139,26 +78,11 @@ export default function AdminPage() {
   }
 
   async function loadGrades() {
-    const q = selectedClassId
-      ? // Filter by class without orderBy to avoid needing a composite index;
-        // sort client-side instead.
-        query(
-          collection(db, "grades"),
-          where("classId", "==", selectedClassId),
-        )
-      : query(collection(db, "grades"), orderBy("submittedAt", "desc"));
+    const q = query(collection(db, "grades"), orderBy("submittedAt", "desc"));
     const snap = await getDocs(q);
-    const docs = snap.docs.map(
-      (d) => ({ id: d.id, ...d.data() }) as GradeSubmission,
+    setGrades(
+      snap.docs.map((d) => ({ id: d.id, ...d.data() }) as GradeSubmission),
     );
-    if (selectedClassId) {
-      docs.sort(
-        (a, b) =>
-          (b.submittedAt as unknown as { seconds: number }).seconds -
-          (a.submittedAt as unknown as { seconds: number }).seconds,
-      );
-    }
-    setGrades(docs);
   }
 
   async function loadAdjustments() {
@@ -193,30 +117,19 @@ export default function AdminPage() {
     setEditingAdjustment(null);
   }
 
-  // Load classes once on mount
-  useEffect(() => {
-    loadClasses();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Reload students/grades when selected class changes
   useEffect(() => {
     loadStudents();
     loadGrades();
     loadAdjustments();
-  }, [selectedClassId]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Real-time settings listener (class-scoped)
-  useEffect(() => {
-    const settingsId = selectedClassId || "grading";
-    const unsub = onSnapshot(doc(db, "settings", settingsId), (snap) => {
+    // Real-time settings listener
+    const unsub = onSnapshot(doc(db, "settings", "grading"), (snap) => {
       if (snap.exists()) {
         setGradingSettings(snap.data() as GradingSettings);
-      } else {
-        setGradingSettings({ midtermOpen: false, finalOpen: false });
       }
     });
     return unsub;
-  }, [selectedClassId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   async function addStudent() {
     setAddError("");
@@ -227,12 +140,7 @@ export default function AdminPage() {
     setAdding(true);
     try {
       const id = newStudentId.trim();
-      const data: Student = {
-        id,
-        studentId: id,
-        name: newName.trim(),
-        ...(selectedClassId ? { classId: selectedClassId } : {}),
-      };
+      const data: Student = { id, studentId: id, name: newName.trim() };
       await setDoc(doc(db, "students", id), data);
       setNewName("");
       setNewStudentId("");
@@ -269,12 +177,7 @@ export default function AdminPage() {
     }
 
     for (const { id, name } of parsed) {
-      await setDoc(doc(db, "students", id), {
-        id,
-        studentId: id,
-        name,
-        ...(selectedClassId ? { classId: selectedClassId } : {}),
-      });
+      await setDoc(doc(db, "students", id), { id, studentId: id, name });
     }
     setBulkText("");
     setBulkMode(false);
@@ -282,13 +185,9 @@ export default function AdminPage() {
   }
 
   async function toggleSetting(key: keyof GradingSettings) {
-    if (!selectedClassId) {
-      alert("請先從上方下拉選單選擇一個班級，再調整開關設定。");
-      return;
-    }
     setSavingSettings(true);
     const next = { ...gradingSettings, [key]: !gradingSettings[key] };
-    await setDoc(doc(db, "settings", selectedClassId), next);
+    await setDoc(doc(db, "settings", "grading"), next);
     setSavingSettings(false);
   }
 
@@ -510,7 +409,7 @@ export default function AdminPage() {
 
   return (
     <div>
-      <div className="mb-4 flex items-center justify-between">
+      <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">管理面板</h1>
           <p className="text-slate-500 text-sm mt-1">
@@ -518,7 +417,7 @@ export default function AdminPage() {
           </p>
         </div>
         <div className="flex gap-2 bg-white border border-slate-100 rounded-xl p-1">
-          {(["classes", "students", "grades", "settings"] as Tab[]).map((t) => (
+          {(["students", "grades", "settings"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -528,263 +427,101 @@ export default function AdminPage() {
                   : "text-slate-600 hover:bg-slate-50"
               }`}
             >
-              {t === "classes" ? (
-                <Layers size={15} />
-              ) : t === "students" ? (
+              {t === "students" ? (
                 <Users size={15} />
               ) : t === "grades" ? (
                 <Star size={15} />
               ) : (
                 <Settings size={15} />
               )}
-              {t === "classes"
-                ? "班級管理"
-                : t === "students"
-                  ? "學生名單"
-                  : t === "grades"
-                    ? "評分結果"
-                    : "開關設定"}
+              {t === "students"
+                ? "學生名單"
+                : t === "grades"
+                  ? "評分結果"
+                  : "開關設定"}
             </button>
           ))}
         </div>
       </div>
 
-      {/* Class selector (hidden on classes tab) */}
-      {tab !== "classes" && classes.length > 0 && (
-        <div className="mb-6 flex items-center gap-3 bg-white border border-slate-100 rounded-xl px-4 py-3">
-          <span className="text-sm font-medium text-slate-600 shrink-0">
-            班級篩選：
-          </span>
-          <select
-            className="flex-1 rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-700 focus:border-indigo-400 focus:outline-none"
-            value={selectedClassId}
-            onChange={(e) => setSelectedClassId(e.target.value)}
-          >
-            <option value="">全部班級</option>
-            {classes.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-          {selectedClassId && (
-            <button
-              onClick={() => setSelectedClassId("")}
-              className="text-xs text-slate-400 hover:text-slate-600 shrink-0"
-            >
-              清除
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* ─── Class Management ─── */}
-      {tab === "classes" && (
-        <div className="space-y-6">
-          {/* Add class */}
-          <div className="card">
-            <h2 className="font-semibold text-slate-700 mb-4">新增班級</h2>
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="label-base">班級名稱</label>
-                <input
-                  className="input-base"
-                  placeholder="例：資管3甲 週一 8:00"
-                  value={newClassName}
-                  onChange={(e) => setNewClassName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addClass()}
-                />
-              </div>
-              <div className="flex-1">
-                <label className="label-base">說明（選填）</label>
-                <input
-                  className="input-base"
-                  placeholder="選填說明"
-                  value={newClassDesc}
-                  onChange={(e) => setNewClassDesc(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addClass()}
-                />
-              </div>
-              <div className="flex items-end">
-                <button
-                  onClick={addClass}
-                  disabled={addingClass}
-                  className="btn-primary py-3!"
-                >
-                  <Plus size={16} />
-                  新增
-                </button>
-              </div>
-            </div>
-            {classError && (
-              <p className="mt-3 text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2 border border-red-100">
-                {classError}
-              </p>
-            )}
-          </div>
-
-          {/* Class list */}
-          <div className="card overflow-hidden p-0!">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-              <h2 className="font-semibold text-slate-700">班級列表</h2>
-              <span className="text-sm text-slate-400">{classes.length} 個班級</span>
-            </div>
-            {classes.length === 0 ? (
-              <div className="px-6 py-12 text-center text-slate-400 text-sm">
-                尚無班級資料，請先新增。
-              </div>
-            ) : (
-              <table className="w-full">
-                <thead>
-                  <tr className="bg-slate-50 text-left">
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                      班級名稱
-                    </th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                      說明
-                    </th>
-                    <th className="px-6 py-3" />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50">
-                  {classes.map((c) => (
-                    <tr key={c.id} className="hover:bg-slate-50/50 transition">
-                      <td className="px-6 py-4 text-sm font-medium text-slate-800">
-                        {c.name}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-slate-500">
-                        {c.description ?? "—"}
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <button
-                          onClick={() => deleteClass(c.id, c.name)}
-                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition"
-                        >
-                          <Trash2 size={15} />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-          </div>
-        </div>
-      )}
-
       {/* ─── Student Management ─── */}
       {tab === "students" && (
         <div className="space-y-6">
-          {/* Hard gate: must have a class selected before adding students */}
-          {!selectedClassId ? (
-            <div className="flex items-start gap-3 rounded-2xl border border-amber-100 bg-amber-50 px-5 py-4">
-              <Layers size={18} className="text-amber-500 mt-0.5 shrink-0" />
-              <div>
-                <p className="text-sm font-semibold text-amber-700">
-                  {classes.length === 0
-                    ? "尚未建立任何班級"
-                    : "尚未選擇班級"}
-                </p>
-                <p className="text-xs text-amber-600 mt-0.5">
-                  {classes.length === 0
-                    ? "請先到「班級管理」建立班級，再回來新增學生。"
-                    : "請先從上方下拉選單選擇一個班級，再新增學生。"}
-                </p>
-                {classes.length === 0 && (
-                  <button
-                    onClick={() => setTab("classes")}
-                    className="mt-2 text-xs font-semibold text-amber-700 underline underline-offset-2 hover:text-amber-800"
-                  >
-                    前往班級管理 →
-                  </button>
-                )}
-              </div>
+          {/* Add Student */}
+          <div className="card">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-slate-700">新增學生</h2>
+              <button
+                onClick={() => setBulkMode((v) => !v)}
+                className="btn-secondary px-3! py-1.5! text-xs"
+              >
+                <Upload size={13} />
+                {bulkMode ? "單筆新增" : "批量匯入"}
+              </button>
             </div>
-          ) : (
-            /* Add Student — only shown when a class is selected */
-            <div className="card">
-              <div className="flex items-center justify-between mb-4">
-                <div>
-                  <h2 className="font-semibold text-slate-700">新增學生</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    加入班級：
-                    <span className="font-medium text-slate-600">
-                      {classes.find((c) => c.id === selectedClassId)?.name}
-                    </span>
-                  </p>
+
+            {!bulkMode ? (
+              <div className="flex gap-3">
+                <div className="flex-1">
+                  <label className="label-base">學號</label>
+                  <input
+                    className="input-base"
+                    placeholder="例：B1234567"
+                    value={newStudentId}
+                    onChange={(e) => setNewStudentId(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addStudent()}
+                  />
                 </div>
-                <button
-                  onClick={() => setBulkMode((v) => !v)}
-                  className="btn-secondary px-3! py-1.5! text-xs"
-                >
-                  <Upload size={13} />
-                  {bulkMode ? "單筆新增" : "批量匯入"}
+                <div className="flex-1">
+                  <label className="label-base">姓名</label>
+                  <input
+                    className="input-base"
+                    placeholder="學生姓名"
+                    value={newName}
+                    onChange={(e) => setNewName(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && addStudent()}
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    onClick={addStudent}
+                    disabled={adding}
+                    className="btn-primary py-3!"
+                  >
+                    <Plus size={16} />
+                    新增
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-slate-400">
+                  每行一位學生，格式：
+                  <code className="bg-slate-100 px-1 rounded">學號 姓名</code>
+                  （空格、逗號或 Tab 分隔）
+                </p>
+                <textarea
+                  className="input-base resize-none font-mono text-xs"
+                  rows={6}
+                  placeholder={
+                    "B1234567 張小明\nB2345678 李大華\nB3456789 王文中"
+                  }
+                  value={bulkText}
+                  onChange={(e) => setBulkText(e.target.value)}
+                />
+                <button onClick={bulkImport} className="btn-primary">
+                  <Upload size={15} />
+                  匯入
                 </button>
               </div>
+            )}
 
-              {!bulkMode ? (
-                <div className="flex gap-3">
-                  <div className="flex-1">
-                    <label className="label-base">學號</label>
-                    <input
-                      className="input-base"
-                      placeholder="例：B1234567"
-                      value={newStudentId}
-                      onChange={(e) => setNewStudentId(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && addStudent()}
-                    />
-                  </div>
-                  <div className="flex-1">
-                    <label className="label-base">姓名</label>
-                    <input
-                      className="input-base"
-                      placeholder="學生姓名"
-                      value={newName}
-                      onChange={(e) => setNewName(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && addStudent()}
-                    />
-                  </div>
-                  <div className="flex items-end">
-                    <button
-                      onClick={addStudent}
-                      disabled={adding}
-                      className="btn-primary py-3!"
-                    >
-                      <Plus size={16} />
-                      新增
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  <p className="text-xs text-slate-400">
-                    每行一位學生，格式：
-                    <code className="bg-slate-100 px-1 rounded">學號 姓名</code>
-                    （空格、逗號或 Tab 分隔）
-                  </p>
-                  <textarea
-                    className="input-base resize-none font-mono text-xs"
-                    rows={6}
-                    placeholder={
-                      "B1234567 張小明\nB2345678 李大華\nB3456789 王文中"
-                    }
-                    value={bulkText}
-                    onChange={(e) => setBulkText(e.target.value)}
-                  />
-                  <button onClick={bulkImport} className="btn-primary">
-                    <Upload size={15} />
-                    匯入
-                  </button>
-                </div>
-              )}
-
-              {addError && (
-                <p className="mt-3 text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2 border border-red-100">
-                  {addError}
-                </p>
-              )}
-            </div>
-          )}
+            {addError && (
+              <p className="mt-3 text-sm text-red-600 bg-red-50 rounded-xl px-3 py-2 border border-red-100">
+                {addError}
+              </p>
+            )}
+          </div>
 
           {/* Student List */}
           <div className="card overflow-hidden p-0!">
@@ -809,9 +546,6 @@ export default function AdminPage() {
                       姓名
                     </th>
                     <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
-                      班級
-                    </th>
-                    <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
                       狀態
                     </th>
                     <th className="px-6 py-3" />
@@ -828,11 +562,6 @@ export default function AdminPage() {
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-800 font-medium">
                         {s.name}
-                      </td>
-                      <td className="px-6 py-4 text-sm text-slate-500">
-                        {classes.find((c) => c.id === s.classId)?.name ?? (
-                          <span className="text-slate-300">—</span>
-                        )}
                       </td>
                       <td className="px-6 py-4">
                         <span
@@ -1232,11 +961,6 @@ export default function AdminPage() {
       {/* ─── Settings ─── */}
       {tab === "settings" && (
         <div className="max-w-lg space-y-4">
-          {!selectedClassId && (
-            <div className="rounded-xl bg-amber-50 border border-amber-100 px-4 py-3 text-sm text-amber-700">
-              請先從上方下拉選單選擇一個班級，再調整該班的評分開關。
-            </div>
-          )}
           <div className="card space-y-5">
             <div>
               <h2 className="font-semibold text-slate-700 mb-1">評分開關</h2>
