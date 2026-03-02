@@ -39,7 +39,7 @@ export default function Header() {
               {student.studentId}
             </span>
           )}
-          <button onClick={handleLogout} className="btn-secondary !px-3 !py-2">
+          <button onClick={handleLogout} className="btn-secondary px-3! py-2!">
             <LogOut size={15} />
             <span className="hidden sm:inline">登出</span>
           </button>
