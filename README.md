@@ -78,6 +78,9 @@ service cloud.firestore {
                     && isStageOpen(request.resource.data.stage);
       allow read: if isAdmin();
     }
+    match /adjustments/{docId} {
+      allow read, write: if isAdmin();
+    }
   }
 }
 ```

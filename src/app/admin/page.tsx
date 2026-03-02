@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import * as XLSX from "xlsx";
 import {
   collection,
   getDocs,
@@ -25,6 +26,10 @@ import {
   Settings,
   Lock,
   Unlock,
+  Download,
+  Edit3,
+  Check,
+  X,
 } from "lucide-react";
 
 type Tab = "students" | "grades" | "settings";
@@ -55,6 +60,14 @@ export default function AdminPage() {
   });
   const [savingSettings, setSavingSettings] = useState(false);
 
+  // Grade summary / adjustments
+  const [gradesView, setGradesView] = useState<"list" | "summary">("list");
+  const [adjustments, setAdjustments] = useState<Record<string, number>>({});
+  const [editingAdjustment, setEditingAdjustment] = useState<string | null>(
+    null,
+  );
+  const [adjustmentInput, setAdjustmentInput] = useState("");
+
   async function loadStudents() {
     const snap = await getDocs(collection(db, "students"));
     setStudents(
@@ -72,9 +85,42 @@ export default function AdminPage() {
     );
   }
 
+  async function loadAdjustments() {
+    try {
+      const snap = await getDocs(collection(db, "adjustments"));
+      const map: Record<string, number> = {};
+      snap.docs.forEach((d) => {
+        map[d.id] = (d.data().adjustedScore as number) ?? 0;
+      });
+      setAdjustments(map);
+    } catch {
+      // Firestore rule for /adjustments not yet deployed — silently skip
+    }
+  }
+
+  async function saveAdjustment(
+    key: string,
+    targetId: string,
+    targetName: string,
+    stage: string,
+  ) {
+    const raw = parseFloat(adjustmentInput);
+    if (isNaN(raw) || raw < 0) return;
+    const clamped = Number(Math.min(100, Math.max(0, raw)).toFixed(2));
+    await setDoc(doc(db, "adjustments", key), {
+      stage,
+      targetId,
+      targetName,
+      adjustedScore: clamped,
+    });
+    setAdjustments((prev) => ({ ...prev, [key]: clamped }));
+    setEditingAdjustment(null);
+  }
+
   useEffect(() => {
     loadStudents();
     loadGrades();
+    loadAdjustments();
 
     // Real-time settings listener
     const unsub = onSnapshot(doc(db, "settings", "grading"), (snap) => {
@@ -149,6 +195,77 @@ export default function AdminPage() {
     stageFilter === "all"
       ? grades
       : grades.filter((g) => g.stage === stageFilter);
+
+  // Per-student averages grouped by (stage, targetId)
+  const gradeSummary = useMemo(() => {
+    const groups: Record<string, typeof filteredGrades> = {};
+    filteredGrades.forEach((g) => {
+      const key = `${g.stage}_${g.targetId}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(g);
+    });
+    return Object.entries(groups)
+      .map(([key, gs]) => {
+        const avg = (fn: (g: (typeof gs)[0]) => number) =>
+          Number((gs.reduce((s, g) => s + fn(g), 0) / gs.length).toFixed(2));
+        const avgTotal = avg((g) => g.total);
+        const teacherScore = key in adjustments ? adjustments[key] : null;
+        return {
+          key,
+          stage: gs[0].stage,
+          targetId: gs[0].targetId,
+          targetName: gs[0].targetName,
+          count: gs.length,
+          avgTopicMastery: avg((g) => g.scores.topicMastery),
+          avgContentRichness: avg((g) => g.scores.contentRichness),
+          avgNarrativeSkill: avg((g) => g.scores.narrativeSkill),
+          avgPresentationSkill: avg((g) => g.scores.presentationSkill),
+          avgTeamwork: avg((g) => g.scores.teamwork),
+          avgTotal,
+          teacherScore,
+          finalScore:
+            teacherScore !== null
+              ? Number(((teacherScore + avgTotal) / 2).toFixed(2))
+              : avgTotal,
+        };
+      })
+      .sort((a, b) =>
+        a.stage === b.stage
+          ? a.targetId.localeCompare(b.targetId)
+          : a.stage.localeCompare(b.stage),
+      );
+  }, [filteredGrades, adjustments]);
+
+  function exportToExcel() {
+    const rows = gradeSummary.map((r) => ({
+      階段: r.stage === "midterm" ? "期中" : "期末",
+      學號: r.targetId,
+      姓名: r.targetName,
+      評分人數: r.count,
+      "主題掌握 (avg/30)": r.avgTopicMastery,
+      "內容豐富 (avg/30)": r.avgContentRichness,
+      "敘事技巧 (avg/20)": r.avgNarrativeSkill,
+      "簡報技巧 (avg/10)": r.avgPresentationSkill,
+      "團隊表現 (avg/10)": r.avgTeamwork,
+      平均總分: r.avgTotal,
+      老師評分: r.teacherScore ?? "未設定",
+      最終分數: r.finalScore,
+    }));
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws["!cols"] = Object.keys(rows[0] || {}).map(() => ({ wch: 18 }));
+    const wb = XLSX.utils.book_new();
+    const sheetName =
+      stageFilter === "midterm"
+        ? "期中"
+        : stageFilter === "final"
+          ? "期末"
+          : "全部";
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(
+      wb,
+      `grades_${stageFilter}_${new Date().toISOString().slice(0, 10)}.xlsx`,
+    );
+  }
 
   return (
     <div>
@@ -337,9 +454,9 @@ export default function AdminPage() {
       {/* ─── Grades View ─── */}
       {tab === "grades" && (
         <div className="space-y-6">
-          {/* Filter */}
+          {/* Filter + view toggle */}
           <div className="card !p-4">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="text-sm text-slate-600 font-medium">篩選：</span>
               {(["all", "midterm", "final"] as const).map((f) => (
                 <button
@@ -358,18 +475,239 @@ export default function AdminPage() {
                       : "期末報告"}
                 </button>
               ))}
-              <span className="ml-auto text-sm text-slate-400">
-                {filteredGrades.length} 筆
-              </span>
+              <div className="ml-auto flex items-center gap-2">
+                <span className="text-sm text-slate-400">
+                  {filteredGrades.length} 筆
+                </span>
+                <div className="flex rounded-lg border border-slate-200 overflow-hidden">
+                  {(["list", "summary"] as const).map((v) => (
+                    <button
+                      key={v}
+                      onClick={() => setGradesView(v)}
+                      className={`px-3 py-1.5 text-xs font-medium transition ${
+                        gradesView === v
+                          ? "bg-slate-700 text-white"
+                          : "bg-white text-slate-600 hover:bg-slate-50"
+                      }`}
+                    >
+                      {v === "list" ? "評分明細" : "成績摘要"}
+                    </button>
+                  ))}
+                </div>
+                {gradesView === "summary" && gradeSummary.length > 0 && (
+                  <button
+                    onClick={exportToExcel}
+                    className="btn-secondary !px-3 !py-1.5 text-xs"
+                  >
+                    <Download size={13} />
+                    匯出 Excel
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
-          {/* Grade list */}
           {filteredGrades.length === 0 ? (
             <div className="card text-center py-12 text-slate-400 text-sm">
               尚無評分資料。
             </div>
+          ) : gradesView === "summary" ? (
+            /* ── Summary table ── */
+            <div className="card !p-0 overflow-x-auto">
+              <div className="px-6 py-3 border-b border-slate-100 flex items-center gap-2">
+                <span className="text-sm font-semibold text-slate-700">
+                  成績摘要
+                </span>
+                <span className="text-xs text-slate-400">
+                  （老師評分：選填，最終分數 = (老師分數 + 同學平均) / 2）
+                </span>
+              </div>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-slate-50 text-left">
+                    {stageFilter === "all" && (
+                      <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">
+                        階段
+                      </th>
+                    )}
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                      學號
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">
+                      姓名
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      人數
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      主題(30)
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      內容(30)
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      敘事(20)
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      簡報(10)
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      團隊(10)
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      平均
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      老師評分
+                    </th>
+                    <th className="px-4 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider text-center">
+                      最終
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50">
+                  {gradeSummary.map((row) => {
+                    const isEditing = editingAdjustment === row.key;
+                    return (
+                      <tr
+                        key={row.key}
+                        className="hover:bg-slate-50/50 transition"
+                      >
+                        {stageFilter === "all" && (
+                          <td className="px-4 py-3">
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-xs font-semibold ${
+                                row.stage === "midterm"
+                                  ? "bg-blue-100 text-blue-700"
+                                  : "bg-purple-100 text-purple-700"
+                              }`}
+                            >
+                              {row.stage === "midterm" ? "期中" : "期末"}
+                            </span>
+                          </td>
+                        )}
+                        <td className="px-4 py-3 font-mono text-slate-600">
+                          {row.targetId}
+                        </td>
+                        <td className="px-4 py-3 font-medium text-slate-800">
+                          {row.targetName}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-500">
+                          {row.count}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-600">
+                          {row.avgTopicMastery}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-600">
+                          {row.avgContentRichness}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-600">
+                          {row.avgNarrativeSkill}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-600">
+                          {row.avgPresentationSkill}
+                        </td>
+                        <td className="px-4 py-3 text-center text-slate-600">
+                          {row.avgTeamwork}
+                        </td>
+                        <td className="px-4 py-3 text-center font-semibold text-slate-700">
+                          {row.avgTotal}
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {isEditing ? (
+                            <div className="flex items-center justify-center gap-1">
+                              <input
+                                type="number"
+                                min={0}
+                                max={100}
+                                step={0.01}
+                                className="w-20 rounded-lg border border-slate-200 px-2 py-1 text-xs text-center focus:border-indigo-400 focus:outline-none"
+                                value={adjustmentInput}
+                                onChange={(e) =>
+                                  setAdjustmentInput(e.target.value)
+                                }
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter")
+                                    saveAdjustment(
+                                      row.key,
+                                      row.targetId,
+                                      row.targetName,
+                                      row.stage,
+                                    );
+                                  if (e.key === "Escape")
+                                    setEditingAdjustment(null);
+                                }}
+                                autoFocus
+                              />
+                              <button
+                                onClick={() =>
+                                  saveAdjustment(
+                                    row.key,
+                                    row.targetId,
+                                    row.targetName,
+                                    row.stage,
+                                  )
+                                }
+                                className="rounded p-1 text-emerald-600 hover:bg-emerald-50"
+                              >
+                                <Check size={13} />
+                              </button>
+                              <button
+                                onClick={() => setEditingAdjustment(null)}
+                                className="rounded p-1 text-slate-400 hover:bg-slate-100"
+                              >
+                                <X size={13} />
+                              </button>
+                            </div>
+                          ) : (
+                            <div className="flex items-center justify-center gap-1">
+                              <span
+                                className={
+                                  row.teacherScore !== null
+                                    ? "font-semibold text-emerald-600"
+                                    : "text-slate-300"
+                                }
+                              >
+                                {row.teacherScore !== null
+                                  ? row.teacherScore
+                                  : "—"}
+                              </span>
+                              <button
+                                onClick={() => {
+                                  setEditingAdjustment(row.key);
+                                  setAdjustmentInput(
+                                    row.teacherScore !== null
+                                      ? String(row.teacherScore)
+                                      : "",
+                                  );
+                                }}
+                                className="rounded p-1 text-slate-400 hover:text-indigo-500 hover:bg-indigo-50"
+                                title="老師評分（0–100），最終 = (老師 + 同學平均) / 2"
+                              >
+                                <Edit3 size={12} />
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <span
+                            className={`text-base font-bold ${
+                              row.teacherScore !== null
+                                ? "text-indigo-600"
+                                : "text-slate-500"
+                            }`}
+                          >
+                            {row.finalScore}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           ) : (
+            /* ── Individual grade list ── */
             <div className="space-y-3">
               {filteredGrades.map((g) => (
                 <div key={g.id} className="card !p-0 overflow-hidden">
@@ -545,11 +883,6 @@ export default function AdminPage() {
                 </div>
               );
             })}
-          </div>
-
-          <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-            <strong>Firestore 安全規則提醒：</strong> 請在 Firebase Console 更新
-            rules，加入 isStageOpen() 檢查確保伺服器端也阻擋提交。 詳見 README。
           </div>
         </div>
       )}
