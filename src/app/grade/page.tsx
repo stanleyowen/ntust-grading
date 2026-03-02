@@ -6,13 +6,16 @@ import {
   collection,
   query,
   getDocs,
+  getDoc,
   addDoc,
   serverTimestamp,
   where,
+  doc,
+  onSnapshot,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { Student, GradeSubmission } from "@/lib/types";
-import { CheckCircle, ChevronDown } from "lucide-react";
+import { Student, GradeSubmission, GradingSettings } from "@/lib/types";
+import { CheckCircle, ChevronDown, Lock } from "lucide-react";
 
 const STAGES = [
   { value: "midterm", label: "期中報告" },
@@ -78,6 +81,23 @@ export default function GradePage() {
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState("");
   const [alreadyGraded, setAlreadyGraded] = useState(false);
+  const [settings, setSettings] = useState<GradingSettings | null>(null);
+
+  const stageLocked =
+    settings === null ||
+    (stage === "midterm" ? !settings.midtermOpen : !settings.finalOpen);
+
+  // Load grading settings (real-time)
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, "settings", "grading"), (snap) => {
+      if (snap.exists()) {
+        setSettings(snap.data() as GradingSettings);
+      } else {
+        setSettings({ midtermOpen: false, finalOpen: false });
+      }
+    });
+    return unsub;
+  }, []);
 
   // Load student list (exclude self)
   useEffect(() => {
@@ -86,7 +106,7 @@ export default function GradePage() {
       const list: Student[] = snap.docs
         .map((d) => d.data() as Student)
         .filter((s) => s.studentId !== student?.studentId);
-      setStudents(list.sort((a, b) => a.name.localeCompare(b.name)));
+      setStudents(list.sort((a, b) => a.studentId.localeCompare(b.studentId)));
     }
     load();
   }, [student]);
@@ -136,6 +156,19 @@ export default function GradePage() {
     }
 
     if (!student) return;
+
+    // Double-check stage is still open (client-side guard before Firestore write)
+    const freshSnap = await getDoc(doc(db, "settings", "grading"));
+    if (freshSnap.exists()) {
+      const s = freshSnap.data() as GradingSettings;
+      const open = stage === "midterm" ? s.midtermOpen : s.finalOpen;
+      if (!open) {
+        setError("此評分階段已關閉，無法提交。");
+        setSubmitting(false);
+        return;
+      }
+    }
+
     const target = students.find((s) => s.studentId === targetId)!;
     const numScores = Object.fromEntries(
       SCORE_FIELDS.map((f) => [f.key, Number(scores[f.key])]),
@@ -203,6 +236,22 @@ export default function GradePage() {
         </p>
       </div>
 
+      {stageLocked && settings !== null && (
+        <div className="mb-6 flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100">
+            <Lock size={18} className="text-slate-500" />
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-slate-700">
+              {stage === "midterm" ? "期中報告" : "期末報告"}評分已關閉
+            </p>
+            <p className="text-xs text-slate-400 mt-0.5">
+              請等待老師開放此評分階段後再提交。
+            </p>
+          </div>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} className="space-y-6">
         {/* Stage selection */}
         <div className="card">
@@ -210,20 +259,35 @@ export default function GradePage() {
             評分階段
           </h2>
           <div className="grid grid-cols-2 gap-3">
-            {STAGES.map((s) => (
-              <button
-                key={s.value}
-                type="button"
-                onClick={() => setStage(s.value as "midterm" | "final")}
-                className={`rounded-xl border-2 px-4 py-3 text-sm font-semibold transition ${
-                  stage === s.value
-                    ? "border-indigo-500 bg-indigo-50 text-indigo-700"
-                    : "border-slate-100 bg-white text-slate-600 hover:border-slate-200"
-                }`}
-              >
-                {s.label}
-              </button>
-            ))}
+            {STAGES.map((s) => {
+              const isOpen =
+                settings &&
+                (s.value === "midterm"
+                  ? settings.midtermOpen
+                  : settings.finalOpen);
+              return (
+                <button
+                  key={s.value}
+                  type="button"
+                  onClick={() => setStage(s.value as "midterm" | "final")}
+                  className={`relative rounded-xl border-2 px-4 py-3 text-sm font-semibold transition ${
+                    stage === s.value
+                      ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                      : "border-slate-100 bg-white text-slate-600 hover:border-slate-200"
+                  }`}
+                >
+                  <span className="flex items-center justify-center gap-1.5">
+                    {!isOpen && <Lock size={13} className="opacity-50" />}
+                    {s.label}
+                  </span>
+                  {!isOpen && (
+                    <span className="absolute top-1.5 right-1.5 rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+                      已關閉
+                    </span>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -346,7 +410,7 @@ export default function GradePage() {
 
         <button
           type="submit"
-          disabled={submitting || !targetId}
+          disabled={submitting || !targetId || stageLocked}
           className="btn-primary w-full"
         >
           {submitting ? (

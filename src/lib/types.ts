@@ -1,3 +1,8 @@
+export interface GradingSettings {
+  midtermOpen: boolean;
+  finalOpen: boolean;
+}
+
 export interface Student {
   id: string; // Firestore doc ID = studentId
   studentId: string;

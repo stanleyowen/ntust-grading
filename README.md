@@ -57,6 +57,15 @@ service cloud.firestore {
           && (request.auth.token.email == "tswu@mail.ntust.edu.tw"
            || request.auth.token.email == "me@stanleyowen.com");
     }
+    function isStageOpen(stage) {
+      let s = get(/databases/$(database)/documents/settings/grading).data;
+      return (stage == 'midterm' && s.midtermOpen == true)
+          || (stage == 'final'   && s.finalOpen   == true);
+    }
+    match /settings/grading {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
     match /students/{studentId} {
       allow read: if request.auth != null;
       allow write: if isAdmin();
@@ -65,7 +74,8 @@ service cloud.firestore {
       allow read, create, update: if request.auth != null && request.auth.uid == uid;
     }
     match /grades/{gradeId} {
-      allow create: if request.auth != null;
+      allow create: if request.auth != null
+                    && isStageOpen(request.resource.data.stage);
       allow read: if isAdmin();
     }
   }

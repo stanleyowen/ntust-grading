@@ -9,9 +9,11 @@ import {
   doc,
   query,
   orderBy,
+  getDoc,
+  onSnapshot,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
-import { Student, GradeSubmission } from "@/lib/types";
+import { Student, GradeSubmission, GradingSettings } from "@/lib/types";
 import {
   Users,
   Star,
@@ -20,9 +22,12 @@ import {
   Upload,
   ChevronDown,
   ChevronUp,
+  Settings,
+  Lock,
+  Unlock,
 } from "lucide-react";
 
-type Tab = "students" | "grades";
+type Tab = "students" | "grades" | "settings";
 
 export default function AdminPage() {
   const [tab, setTab] = useState<Tab>("students");
@@ -43,12 +48,19 @@ export default function AdminPage() {
   );
   const [expandedGrade, setExpandedGrade] = useState<string | null>(null);
 
+  // Settings
+  const [gradingSettings, setGradingSettings] = useState<GradingSettings>({
+    midtermOpen: false,
+    finalOpen: false,
+  });
+  const [savingSettings, setSavingSettings] = useState(false);
+
   async function loadStudents() {
     const snap = await getDocs(collection(db, "students"));
     setStudents(
       snap.docs
         .map((d) => d.data() as Student)
-        .sort((a, b) => a.name.localeCompare(b.name)),
+        .sort((a, b) => a.studentId.localeCompare(b.studentId)),
     );
   }
 
@@ -63,6 +75,14 @@ export default function AdminPage() {
   useEffect(() => {
     loadStudents();
     loadGrades();
+
+    // Real-time settings listener
+    const unsub = onSnapshot(doc(db, "settings", "grading"), (snap) => {
+      if (snap.exists()) {
+        setGradingSettings(snap.data() as GradingSettings);
+      }
+    });
+    return unsub;
   }, []);
 
   async function addStudent() {
@@ -118,6 +138,13 @@ export default function AdminPage() {
     await loadStudents();
   }
 
+  async function toggleSetting(key: keyof GradingSettings) {
+    setSavingSettings(true);
+    const next = { ...gradingSettings, [key]: !gradingSettings[key] };
+    await setDoc(doc(db, "settings", "grading"), next);
+    setSavingSettings(false);
+  }
+
   const filteredGrades =
     stageFilter === "all"
       ? grades
@@ -133,7 +160,7 @@ export default function AdminPage() {
           </p>
         </div>
         <div className="flex gap-2 bg-white border border-slate-100 rounded-xl p-1">
-          {(["students", "grades"] as Tab[]).map((t) => (
+          {(["students", "grades", "settings"] as Tab[]).map((t) => (
             <button
               key={t}
               onClick={() => setTab(t)}
@@ -143,8 +170,18 @@ export default function AdminPage() {
                   : "text-slate-600 hover:bg-slate-50"
               }`}
             >
-              {t === "students" ? <Users size={15} /> : <Star size={15} />}
-              {t === "students" ? "學生名單" : "評分結果"}
+              {t === "students" ? (
+                <Users size={15} />
+              ) : t === "grades" ? (
+                <Star size={15} />
+              ) : (
+                <Settings size={15} />
+              )}
+              {t === "students"
+                ? "學生名單"
+                : t === "grades"
+                  ? "評分結果"
+                  : "開關設定"}
             </button>
           ))}
         </div>
@@ -440,6 +477,80 @@ export default function AdminPage() {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* ─── Settings ─── */}
+      {tab === "settings" && (
+        <div className="max-w-lg space-y-4">
+          <div className="card space-y-5">
+            <div>
+              <h2 className="font-semibold text-slate-700 mb-1">評分開關</h2>
+              <p className="text-xs text-slate-400">
+                開啟後學生才能提交該階段的評分；關閉後立即生效且拒絕新提交。
+              </p>
+            </div>
+
+            {(
+              [
+                {
+                  key: "midtermOpen" as keyof GradingSettings,
+                  label: "期中報告",
+                  desc: "開放學生提交期中評分",
+                },
+                {
+                  key: "finalOpen" as keyof GradingSettings,
+                  label: "期末報告",
+                  desc: "開放學生提交期末評分",
+                },
+              ] as const
+            ).map(({ key, label, desc }) => {
+              const isOpen = gradingSettings[key];
+              return (
+                <div
+                  key={key}
+                  className="flex items-center justify-between rounded-xl border border-slate-100 px-4 py-4"
+                >
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`flex h-9 w-9 items-center justify-center rounded-xl ${isOpen ? "bg-emerald-100" : "bg-slate-100"}`}
+                    >
+                      {isOpen ? (
+                        <Unlock size={16} className="text-emerald-600" />
+                      ) : (
+                        <Lock size={16} className="text-slate-500" />
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-700">
+                        {label}
+                      </p>
+                      <p className="text-xs text-slate-400">{desc}</p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => toggleSetting(key)}
+                    disabled={savingSettings}
+                    className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none disabled:opacity-50 ${
+                      isOpen ? "bg-emerald-500" : "bg-slate-200"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                        isOpen ? "translate-x-6" : "translate-x-1"
+                      }`}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-700">
+            <strong>Firestore 安全規則提醒：</strong> 請在 Firebase Console 更新
+            rules，加入 isStageOpen() 檢查確保伺服器端也阻擋提交。 詳見 README。
+          </div>
         </div>
       )}
     </div>
