@@ -177,6 +177,9 @@ export default function GradePage() {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    
+    // Prevent double submission
+    if (submitting) return;
 
     const validationError = validate();
     if (validationError) {
@@ -218,9 +221,19 @@ export default function GradePage() {
 
     setSubmitting(true);
     try {
-      if (existingGradeId) {
+      // Double-check for existing grade at submit time to prevent race conditions
+      const existingGradeQuery = query(
+        collection(db, "grades"),
+        where("graderId", "==", student.studentId),
+        where("targetId", "==", targetId),
+        where("stage", "==", stage),
+      );
+      const existingGradeSnap = await getDocs(existingGradeQuery);
+      
+      if (!existingGradeSnap.empty) {
         // Update existing grade
-        await setDoc(doc(db, "grades", existingGradeId), {
+        const gradeDocId = existingGradeSnap.docs[0].id;
+        await setDoc(doc(db, "grades", gradeDocId), {
           ...submission,
           submittedAt: serverTimestamp(),
         });
@@ -234,7 +247,8 @@ export default function GradePage() {
         setWasUpdate(false);
       }
       setSubmitted(true);
-    } catch {
+    } catch (err) {
+      console.error("Grade submission error:", err);
       setError("提交失敗，請再試一次。");
     } finally {
       setSubmitting(false);
