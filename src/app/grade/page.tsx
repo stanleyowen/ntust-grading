@@ -8,6 +8,7 @@ import {
   getDocs,
   getDoc,
   addDoc,
+  setDoc,
   serverTimestamp,
   where,
   doc,
@@ -79,8 +80,10 @@ export default function GradePage() {
   const [comment, setComment] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [wasUpdate, setWasUpdate] = useState(false);
   const [error, setError] = useState("");
   const [alreadyGraded, setAlreadyGraded] = useState(false);
+  const [existingGradeId, setExistingGradeId] = useState<string | null>(null);
   const [settings, setSettings] = useState<GradingSettings | null>(null);
 
   const stageLocked =
@@ -111,10 +114,14 @@ export default function GradePage() {
     load();
   }, [student]);
 
-  // Check if already graded this target for this stage
+  // Check if already graded this target for this stage and load existing grade
   useEffect(() => {
     async function check() {
-      if (!targetId || !student) return;
+      if (!targetId || !student) {
+        setAlreadyGraded(false);
+        setExistingGradeId(null);
+        return;
+      }
       const q = query(
         collection(db, "grades"),
         where("graderId", "==", student.studentId),
@@ -122,7 +129,29 @@ export default function GradePage() {
         where("stage", "==", stage),
       );
       const snap = await getDocs(q);
-      setAlreadyGraded(!snap.empty);
+      
+      if (!snap.empty) {
+        setAlreadyGraded(true);
+        const existingGrade = snap.docs[0];
+        setExistingGradeId(existingGrade.id);
+        
+        // Load existing scores and comment
+        const gradeData = existingGrade.data() as GradeSubmission;
+        setScores({
+          topicMastery: String(gradeData.scores.topicMastery),
+          contentRichness: String(gradeData.scores.contentRichness),
+          narrativeSkill: String(gradeData.scores.narrativeSkill),
+          presentationSkill: String(gradeData.scores.presentationSkill),
+          teamwork: String(gradeData.scores.teamwork),
+        });
+        setComment(gradeData.comment || "");
+      } else {
+        setAlreadyGraded(false);
+        setExistingGradeId(null);
+        // Reset to defaults when switching to a new student
+        setScores(defaultScores);
+        setComment("");
+      }
     }
     check();
   }, [targetId, stage, student]);
@@ -189,10 +218,21 @@ export default function GradePage() {
 
     setSubmitting(true);
     try {
-      await addDoc(collection(db, "grades"), {
-        ...submission,
-        submittedAt: serverTimestamp(),
-      });
+      if (existingGradeId) {
+        // Update existing grade
+        await setDoc(doc(db, "grades", existingGradeId), {
+          ...submission,
+          submittedAt: serverTimestamp(),
+        });
+        setWasUpdate(true);
+      } else {
+        // Create new grade
+        await addDoc(collection(db, "grades"), {
+          ...submission,
+          submittedAt: serverTimestamp(),
+        });
+        setWasUpdate(false);
+      }
       setSubmitted(true);
     } catch {
       setError("提交失敗，請再試一次。");
@@ -207,7 +247,9 @@ export default function GradePage() {
     setScores(defaultScores);
     setComment("");
     setSubmitted(false);
+    setWasUpdate(false);
     setAlreadyGraded(false);
+    setExistingGradeId(null);
     setError("");
   }
 
@@ -217,8 +259,12 @@ export default function GradePage() {
         <div className="w-16 h-16 rounded-full bg-emerald-100 flex items-center justify-center">
           <CheckCircle size={32} className="text-emerald-600" />
         </div>
-        <h2 className="text-2xl font-bold text-slate-800">提交成功！</h2>
-        <p className="text-slate-500">您的評分已成功記錄</p>
+        <h2 className="text-2xl font-bold text-slate-800">
+          {wasUpdate ? "更新成功！" : "提交成功！"}
+        </h2>
+        <p className="text-slate-500">
+          {wasUpdate ? "您的評分已成功更新" : "您的評分已成功記錄"}
+        </p>
         <button onClick={resetForm} className="btn-primary mt-2">
           繼續評分其他同學
         </button>
@@ -316,9 +362,9 @@ export default function GradePage() {
           </div>
 
           {alreadyGraded && targetId && (
-            <div className="mt-3 rounded-xl bg-amber-50 border border-amber-100 px-4 py-3 text-sm text-amber-700">
+            <div className="mt-3 rounded-xl bg-blue-50 border border-blue-100 px-4 py-3 text-sm text-blue-700">
               您已為此同學評分過（{stage === "midterm" ? "期中" : "期末"}
-              ），再次提交將新增一筆記錄。
+              ）。您可以修改分數和評語，再次提交將更新現有評分。
             </div>
           )}
         </div>
@@ -416,7 +462,7 @@ export default function GradePage() {
           {submitting ? (
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
           ) : null}
-          {submitting ? "提交中..." : "提交評分"}
+          {submitting ? (alreadyGraded ? "更新中..." : "提交中...") : (alreadyGraded ? "更新評分" : "提交評分")}
         </button>
       </form>
     </div>
