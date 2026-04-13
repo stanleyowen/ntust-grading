@@ -102,13 +102,11 @@ export default function GradePage() {
     return unsub;
   }, []);
 
-  // Load student list (exclude self)
+  // Load student list (including self)
   useEffect(() => {
     async function load() {
       const snap = await getDocs(collection(db, "students"));
-      const list: Student[] = snap.docs
-        .map((d) => d.data() as Student)
-        .filter((s) => s.studentId !== student?.studentId);
+      const list: Student[] = snap.docs.map((d) => d.data() as Student);
       setStudents(list.sort((a, b) => a.studentId.localeCompare(b.studentId)));
     }
     load();
