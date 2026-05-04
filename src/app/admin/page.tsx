@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx";
 import {
   collection,
   getDocs,
+  getDocsFromServer,
   setDoc,
   deleteDoc,
   doc,
@@ -30,6 +31,7 @@ import {
   Edit3,
   Check,
   X,
+  RefreshCw,
 } from "lucide-react";
 
 type Tab = "students" | "grades" | "settings";
@@ -67,55 +69,91 @@ export default function AdminPage() {
     null,
   );
   const [adjustmentInput, setAdjustmentInput] = useState("");
+  const [refreshingScores, setRefreshingScores] = useState(false);
 
-  async function loadStudents() {
-    const studentsSnap = await getDocs(collection(db, "students"));
+  const fetchStudents = useCallback(
+    async (forceServer = false): Promise<Student[]> => {
+      const loadDocs = forceServer ? getDocsFromServer : getDocs;
+      const studentsSnap = await loadDocs(collection(db, "students"));
 
-    // Build a map of studentId -> uid from students_auth so that students who
-    // registered before the uid-backfill fix still show as "已註冊".
-    const uidByStudentId: Record<string, string> = {};
-    try {
-      const authSnap = await getDocs(collection(db, "students_auth"));
-      authSnap.docs.forEach((d) => {
-        const data = d.data();
-        if (data.studentId && data.uid) {
-          uidByStudentId[data.studentId as string] = data.uid as string;
-        }
-      });
-    } catch {
-      // Firestore rules may restrict admin reads of students_auth; best-effort only.
-    }
+      // Build a map of studentId -> uid from students_auth so that students who
+      // registered before the uid-backfill fix still show as "已註冊".
+      const uidByStudentId: Record<string, string> = {};
+      try {
+        const authSnap = await loadDocs(collection(db, "students_auth"));
+        authSnap.docs.forEach((d) => {
+          const data = d.data();
+          if (data.studentId && data.uid) {
+            uidByStudentId[data.studentId as string] = data.uid as string;
+          }
+        });
+      } catch {
+        // Firestore rules may restrict admin reads of students_auth; best-effort only.
+      }
 
-    setStudents(
-      studentsSnap.docs
+      return studentsSnap.docs
         .map((d) => {
           const s = d.data() as Student;
           return s.uid ? s : { ...s, uid: uidByStudentId[s.studentId] };
         })
-        .sort((a, b) => a.studentId.localeCompare(b.studentId)),
-    );
-  }
+        .sort((a, b) => a.studentId.localeCompare(b.studentId));
+    },
+    [],
+  );
 
-  async function loadGrades() {
-    const q = query(collection(db, "grades"), orderBy("submittedAt", "desc"));
-    const snap = await getDocs(q);
-    setGrades(
-      snap.docs.map((d) => ({ id: d.id, ...d.data() }) as GradeSubmission),
-    );
-  }
+  const loadStudents = useCallback(async (forceServer = false) => {
+    setStudents(await fetchStudents(forceServer));
+  }, [fetchStudents]);
 
-  async function loadAdjustments() {
+  const fetchGrades = useCallback(
+    async (forceServer = false): Promise<GradeSubmission[]> => {
+      const loadDocs = forceServer ? getDocsFromServer : getDocs;
+      const q = query(collection(db, "grades"), orderBy("submittedAt", "desc"));
+      const snap = await loadDocs(q);
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }) as GradeSubmission);
+    },
+    [],
+  );
+
+  const loadGrades = useCallback(async (forceServer = false) => {
+    setGrades(await fetchGrades(forceServer));
+  }, [fetchGrades]);
+
+  const fetchAdjustments = useCallback(
+    async (forceServer = false): Promise<Record<string, number>> => {
+      const loadDocs = forceServer ? getDocsFromServer : getDocs;
+      try {
+        const snap = await loadDocs(collection(db, "adjustments"));
+        const map: Record<string, number> = {};
+        snap.docs.forEach((d) => {
+          map[d.id] = (d.data().adjustedScore as number) ?? 0;
+        });
+        return map;
+      } catch {
+        // Firestore rule for /adjustments not yet deployed — silently skip
+        return {};
+      }
+    },
+    [],
+  );
+
+  const loadAdjustments = useCallback(async (forceServer = false) => {
+    setAdjustments(await fetchAdjustments(forceServer));
+  }, [fetchAdjustments]);
+
+  const refreshScoresData = useCallback(async () => {
+    setRefreshingScores(true);
     try {
-      const snap = await getDocs(collection(db, "adjustments"));
-      const map: Record<string, number> = {};
-      snap.docs.forEach((d) => {
-        map[d.id] = (d.data().adjustedScore as number) ?? 0;
-      });
-      setAdjustments(map);
-    } catch {
-      // Firestore rule for /adjustments not yet deployed — silently skip
+      const [latestStudents, latestGrades, latestAdjustments] = await Promise.all(
+        [fetchStudents(true), fetchGrades(true), fetchAdjustments(true)],
+      );
+      setStudents(latestStudents);
+      setGrades(latestGrades);
+      setAdjustments(latestAdjustments);
+    } finally {
+      setRefreshingScores(false);
     }
-  }
+  }, [fetchAdjustments, fetchGrades, fetchStudents]);
 
   async function saveAdjustment(
     key: string,
@@ -148,7 +186,7 @@ export default function AdminPage() {
       }
     });
     return unsub;
-  }, []);
+  }, [loadAdjustments, loadGrades, loadStudents]);
 
   async function addStudent() {
     setAddError("");
@@ -255,175 +293,186 @@ export default function AdminPage() {
       );
   }, [filteredGrades, adjustments]);
 
-  function exportToExcel() {
-    // Build per-stage summaries independent of the current filter
-    function buildSummary(gradeList: GradeSubmission[]) {
-      const groups: Record<string, typeof gradeList> = {};
-      gradeList.forEach((g) => {
-        const key = `${g.stage}_${g.targetId}`;
-        if (!groups[key]) groups[key] = [];
-        groups[key].push(g);
-      });
-      return Object.entries(groups)
-        .map(([key, gs]) => {
-          const avg = (fn: (g: (typeof gs)[0]) => number) =>
-            Number((gs.reduce((s, g) => s + fn(g), 0) / gs.length).toFixed(2));
-          const avgTotal = avg((g) => g.total);
-          const teacherScore = key in adjustments ? adjustments[key] : null;
-          return {
-            key,
-            stage: gs[0].stage,
-            targetId: gs[0].targetId,
-            targetName: gs[0].targetName,
-            count: gs.length,
-            avgTopicMastery: avg((g) => g.scores.topicMastery),
-            avgContentRichness: avg((g) => g.scores.contentRichness),
-            avgNarrativeSkill: avg((g) => g.scores.narrativeSkill),
-            avgPresentationSkill: avg((g) => g.scores.presentationSkill),
-            avgTeamwork: avg((g) => g.scores.teamwork),
-            avgTotal,
-            teacherScore,
-            finalScore:
-              teacherScore !== null
-                ? Number(((teacherScore + avgTotal) / 2).toFixed(2))
-                : avgTotal,
-          };
-        })
-        .sort((a, b) => a.targetId.localeCompare(b.targetId));
-    }
+  async function exportToExcel() {
+    setRefreshingScores(true);
+    try {
+      const [latestStudents, latestGrades, latestAdjustments] = await Promise.all(
+        [fetchStudents(true), fetchGrades(true), fetchAdjustments(true)],
+      );
 
-    const midSummary = buildSummary(
-      grades.filter((g) => g.stage === "midterm"),
-    );
-    const finalSummary = buildSummary(
-      grades.filter((g) => g.stage === "final"),
-    );
+      setStudents(latestStudents);
+      setGrades(latestGrades);
+      setAdjustments(latestAdjustments);
 
-    const stageColDef = [
-      { wch: 10 }, // 學號
-      { wch: 10 }, // 姓名
-      { wch: 6 },  // 評分人數
-      { wch: 10 }, // 主題掌握
-      { wch: 10 }, // 內容豐富
-      { wch: 10 }, // 敘事技巧
-      { wch: 10 }, // 簡報技巧
-      { wch: 10 }, // 團隊表現
-      { wch: 10 }, // 學生評分
-      { wch: 10 }, // 老師評分
-      { wch: 10 }, // 最終評分
-    ];
+      // Build per-stage summaries independent of the current filter
+      function buildSummary(gradeList: GradeSubmission[]) {
+        const groups: Record<string, typeof gradeList> = {};
+        gradeList.forEach((g) => {
+          const key = `${g.stage}_${g.targetId}`;
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(g);
+        });
+        return Object.entries(groups)
+          .map(([key, gs]) => {
+            const avg = (fn: (g: (typeof gs)[0]) => number) =>
+              Number((gs.reduce((s, g) => s + fn(g), 0) / gs.length).toFixed(2));
+            const avgTotal = avg((g) => g.total);
+            const teacherScore =
+              key in latestAdjustments ? latestAdjustments[key] : null;
+            return {
+              key,
+              stage: gs[0].stage,
+              targetId: gs[0].targetId,
+              targetName: gs[0].targetName,
+              count: gs.length,
+              avgTopicMastery: avg((g) => g.scores.topicMastery),
+              avgContentRichness: avg((g) => g.scores.contentRichness),
+              avgNarrativeSkill: avg((g) => g.scores.narrativeSkill),
+              avgPresentationSkill: avg((g) => g.scores.presentationSkill),
+              avgTeamwork: avg((g) => g.scores.teamwork),
+              avgTotal,
+              teacherScore,
+              finalScore:
+                teacherScore !== null
+                  ? Number(((teacherScore + avgTotal) / 2).toFixed(2))
+                  : avgTotal,
+            };
+          })
+          .sort((a, b) => a.targetId.localeCompare(b.targetId));
+      }
 
-    function makeStageSheet(summary: ReturnType<typeof buildSummary>) {
-      const rows = summary.map((r) => ({
-        學號: r.targetId,
-        姓名: r.targetName,
-        評分人數: r.count,
-        "主題掌握 (avg/30)": r.avgTopicMastery,
-        "內容豐富 (avg/30)": r.avgContentRichness,
-        "敘事技巧 (avg/20)": r.avgNarrativeSkill,
-        "簡報技巧 (avg/10)": r.avgPresentationSkill,
-        "團隊表現 (avg/10)": r.avgTeamwork,
-        學生評分: r.avgTotal,
-        老師評分: r.teacherScore ?? "",
-        最終評分: r.finalScore,
-      }));
-      const ws = XLSX.utils.json_to_sheet(rows);
-      ws["!cols"] = stageColDef;
-      return ws;
-    }
+      const midSummary = buildSummary(
+        latestGrades.filter((g) => g.stage === "midterm"),
+      );
+      const finalSummary = buildSummary(
+        latestGrades.filter((g) => g.stage === "final"),
+      );
 
-    // "All" sheet with two-row merged headers (matches the image)
-    const midMap = Object.fromEntries(midSummary.map((r) => [r.targetId, r]));
-    const finalMap = Object.fromEntries(
-      finalSummary.map((r) => [r.targetId, r]),
-    );
-
-    const headerRow1 = [
-      "姓名",
-      "學號",
-      "期中成績 (30%)",
-      "",
-      "",
-      "期末成績 (30%)",
-      "",
-      "",
-      "出席 (20%)",
-      "課堂互動 (20%)",
-      "最終成績",
-    ];
-    const headerRow2 = [
-      "",
-      "",
-      "學生評分",
-      "老師評分",
-      "最終評分",
-      "學生評分",
-      "老師評分",
-      "最終評分",
-      "",
-      "",
-      "",
-    ];
-
-    const sortedStudents = [...students].sort((a, b) =>
-      a.studentId.localeCompare(b.studentId),
-    );
-
-    const dataRows = sortedStudents.map((s) => {
-      const mid = midMap[s.studentId];
-      const fin = finalMap[s.studentId];
-      return [
-        s.name,
-        s.studentId,
-        mid?.avgTotal ?? "",
-        mid?.teacherScore ?? "",
-        mid ? mid.finalScore : "",
-        fin?.avgTotal ?? "",
-        fin?.teacherScore ?? "",
-        fin ? fin.finalScore : "",
-        "", // 出席
-        "", // 課堂互動
-        "", // 最終成績
+      const stageColDef = [
+        { wch: 10 }, // 學號
+        { wch: 10 }, // 姓名
+        { wch: 6 }, // 評分人數
+        { wch: 10 }, // 主題掌握
+        { wch: 10 }, // 內容豐富
+        { wch: 10 }, // 敘事技巧
+        { wch: 10 }, // 簡報技巧
+        { wch: 10 }, // 團隊表現
+        { wch: 10 }, // 學生評分
+        { wch: 10 }, // 老師評分
+        { wch: 10 }, // 最終評分
       ];
-    });
 
-    const allWs = XLSX.utils.aoa_to_sheet([
-      headerRow1,
-      headerRow2,
-      ...dataRows,
-    ]);
-    allWs["!merges"] = [
-      { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }, // 姓名
-      { s: { r: 0, c: 1 }, e: { r: 1, c: 1 } }, // 學號
-      { s: { r: 0, c: 2 }, e: { r: 0, c: 4 } }, // 期中成績 (30%)
-      { s: { r: 0, c: 5 }, e: { r: 0, c: 7 } }, // 期末成績 (30%)
-      { s: { r: 0, c: 8 }, e: { r: 1, c: 8 } }, // 出席 (20%)
-      { s: { r: 0, c: 9 }, e: { r: 1, c: 9 } }, // 課堂互動 (20%)
-      { s: { r: 0, c: 10 }, e: { r: 1, c: 10 } }, // 最終成績
-    ];
-    allWs["!cols"] = [
-      { wch: 10 }, // 姓名
-      { wch: 12 }, // 學號
-      { wch: 14 }, // 期中 學生評分
-      { wch: 10 }, // 期中 老師評分
-      { wch: 10 }, // 期中 最終評分
-      { wch: 14 }, // 期末 學生評分
-      { wch: 10 }, // 期末 老師評分
-      { wch: 10 }, // 期末 最終評分
-      { wch: 10 }, // 出席
-      { wch: 14 }, // 課堂互動
-      { wch: 10 }, // 最終成績
-    ];
+      function makeStageSheet(summary: ReturnType<typeof buildSummary>) {
+        const rows = summary.map((r) => ({
+          學號: r.targetId,
+          姓名: r.targetName,
+          評分人數: r.count,
+          "主題掌握 (avg/30)": r.avgTopicMastery,
+          "內容豐富 (avg/30)": r.avgContentRichness,
+          "敘事技巧 (avg/20)": r.avgNarrativeSkill,
+          "簡報技巧 (avg/10)": r.avgPresentationSkill,
+          "團隊表現 (avg/10)": r.avgTeamwork,
+          學生評分: r.avgTotal,
+          老師評分: r.teacherScore ?? "",
+          最終評分: r.finalScore,
+        }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        ws["!cols"] = stageColDef;
+        return ws;
+      }
 
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, makeStageSheet(midSummary), "期中");
-    XLSX.utils.book_append_sheet(wb, makeStageSheet(finalSummary), "期末");
-    XLSX.utils.book_append_sheet(wb, allWs, "全部");
+      // "All" sheet with two-row merged headers (matches the image)
+      const midMap = Object.fromEntries(midSummary.map((r) => [r.targetId, r]));
+      const finalMap = Object.fromEntries(
+        finalSummary.map((r) => [r.targetId, r]),
+      );
 
-    XLSX.writeFile(
-      wb,
-      `grades_${new Date().toISOString().slice(0, 10)}.xlsx`,
-    );
+      const headerRow1 = [
+        "姓名",
+        "學號",
+        "期中成績 (30%)",
+        "",
+        "",
+        "期末成績 (30%)",
+        "",
+        "",
+        "出席 (20%)",
+        "課堂互動 (20%)",
+        "最終成績",
+      ];
+      const headerRow2 = [
+        "",
+        "",
+        "學生評分",
+        "老師評分",
+        "最終評分",
+        "學生評分",
+        "老師評分",
+        "最終評分",
+        "",
+        "",
+        "",
+      ];
+
+      const sortedStudents = [...latestStudents].sort((a, b) =>
+        a.studentId.localeCompare(b.studentId),
+      );
+
+      const dataRows = sortedStudents.map((s) => {
+        const mid = midMap[s.studentId];
+        const fin = finalMap[s.studentId];
+        return [
+          s.name,
+          s.studentId,
+          mid?.avgTotal ?? "",
+          mid?.teacherScore ?? "",
+          mid ? mid.finalScore : "",
+          fin?.avgTotal ?? "",
+          fin?.teacherScore ?? "",
+          fin ? fin.finalScore : "",
+          "", // 出席
+          "", // 課堂互動
+          "", // 最終成績
+        ];
+      });
+
+      const allWs = XLSX.utils.aoa_to_sheet([
+        headerRow1,
+        headerRow2,
+        ...dataRows,
+      ]);
+      allWs["!merges"] = [
+        { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }, // 姓名
+        { s: { r: 0, c: 1 }, e: { r: 1, c: 1 } }, // 學號
+        { s: { r: 0, c: 2 }, e: { r: 0, c: 4 } }, // 期中成績 (30%)
+        { s: { r: 0, c: 5 }, e: { r: 0, c: 7 } }, // 期末成績 (30%)
+        { s: { r: 0, c: 8 }, e: { r: 1, c: 8 } }, // 出席 (20%)
+        { s: { r: 0, c: 9 }, e: { r: 1, c: 9 } }, // 課堂互動 (20%)
+        { s: { r: 0, c: 10 }, e: { r: 1, c: 10 } }, // 最終成績
+      ];
+      allWs["!cols"] = [
+        { wch: 10 }, // 姓名
+        { wch: 12 }, // 學號
+        { wch: 14 }, // 期中 學生評分
+        { wch: 10 }, // 期中 老師評分
+        { wch: 10 }, // 期中 最終評分
+        { wch: 14 }, // 期末 學生評分
+        { wch: 10 }, // 期末 老師評分
+        { wch: 10 }, // 期末 最終評分
+        { wch: 10 }, // 出席
+        { wch: 14 }, // 課堂互動
+        { wch: 10 }, // 最終成績
+      ];
+
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, makeStageSheet(midSummary), "期中");
+      XLSX.utils.book_append_sheet(wb, makeStageSheet(finalSummary), "期末");
+      XLSX.utils.book_append_sheet(wb, allWs, "全部");
+
+      XLSX.writeFile(wb, `grades_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } finally {
+      setRefreshingScores(false);
+    }
   }
 
   return (
@@ -653,10 +702,22 @@ export default function AdminPage() {
                     </button>
                   ))}
                 </div>
+                <button
+                  onClick={refreshScoresData}
+                  disabled={refreshingScores}
+                  className="btn-secondary px-3! py-1.5! text-xs disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  <RefreshCw
+                    size={13}
+                    className={refreshingScores ? "animate-spin" : undefined}
+                  />
+                  {refreshingScores ? "更新中..." : "重新整理"}
+                </button>
                 {gradesView === "summary" && gradeSummary.length > 0 && (
                   <button
                     onClick={exportToExcel}
-                    className="btn-secondary px-3! py-1.5! text-xs"
+                    disabled={refreshingScores}
+                    className="btn-secondary px-3! py-1.5! text-xs disabled:opacity-60 disabled:cursor-not-allowed"
                   >
                     <Download size={13} />
                     匯出 Excel
