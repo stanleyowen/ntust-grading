@@ -347,6 +347,90 @@ export default function AdminPage() {
       const finalSummary = buildSummary(
         latestGrades.filter((g) => g.stage === "final"),
       );
+      const studentById = Object.fromEntries(
+        latestStudents.map((s) => [s.studentId, s]),
+      );
+
+      const formatDateTime = (date: Date) => {
+        const pad = (n: number) => String(n).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(
+          date.getDate(),
+        )} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+          date.getSeconds(),
+        )}`;
+      };
+
+      const normalizeSubmittedAt = (submittedAt: unknown): string => {
+        if (!submittedAt) return "";
+        if (submittedAt instanceof Date) return formatDateTime(submittedAt);
+        if (
+          typeof submittedAt === "object" &&
+          submittedAt !== null &&
+          "toDate" in submittedAt &&
+          typeof submittedAt.toDate === "function"
+        ) {
+          return formatDateTime(submittedAt.toDate() as Date);
+        }
+        if (
+          typeof submittedAt === "object" &&
+          submittedAt !== null &&
+          "seconds" in submittedAt &&
+          typeof submittedAt.seconds === "number"
+        ) {
+          return formatDateTime(new Date(submittedAt.seconds * 1000));
+        }
+        const parsed = new Date(String(submittedAt));
+        return Number.isNaN(parsed.getTime()) ? "" : formatDateTime(parsed);
+      };
+
+      const getStudentClass = (studentId: string): string => {
+        const student = studentById[studentId];
+        if (!student) return "";
+        const candidate = (
+          student as Student & {
+            className?: string;
+            class?: string;
+            classId?: string;
+          }
+        );
+        return candidate.className || candidate.class || candidate.classId || "";
+      };
+
+      const detailRows = latestGrades.map((g) => ({
+        評分者學號: g.graderId,
+        評分者姓名: g.graderName,
+        評分者班級: getStudentClass(g.graderId),
+        被評者學號: g.targetId,
+        被評者姓名: g.targetName,
+        被評者班級: getStudentClass(g.targetId),
+        場次: g.stage === "midterm" ? "期中報告" : "期末報告",
+        主題掌握: g.scores.topicMastery,
+        內容豐富: g.scores.contentRichness,
+        敘事技巧: g.scores.narrativeSkill,
+        簡報技巧: g.scores.presentationSkill,
+        團隊表現: g.scores.teamwork,
+        總分: g.total,
+        建議或留言: g.comment || "",
+        提交時間: normalizeSubmittedAt(g.submittedAt),
+      }));
+      const detailWs = XLSX.utils.json_to_sheet(detailRows);
+      detailWs["!cols"] = [
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 12 },
+        { wch: 10 },
+        { wch: 8 },
+        { wch: 8 },
+        { wch: 8 },
+        { wch: 8 },
+        { wch: 8 },
+        { wch: 8 },
+        { wch: 24 },
+        { wch: 20 },
+      ];
 
       const stageColDef = [
         { wch: 10 }, // 學號
@@ -467,6 +551,7 @@ export default function AdminPage() {
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, makeStageSheet(midSummary), "期中");
       XLSX.utils.book_append_sheet(wb, makeStageSheet(finalSummary), "期末");
+      XLSX.utils.book_append_sheet(wb, detailWs, "評分明細");
       XLSX.utils.book_append_sheet(wb, allWs, "全部");
 
       XLSX.writeFile(wb, `grades_${new Date().toISOString().slice(0, 10)}.xlsx`);
